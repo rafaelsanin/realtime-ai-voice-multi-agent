@@ -1,19 +1,18 @@
 """Bella Vista voice bot entrypoint.
 
-Commit 2: single-agent pipeline over native LiveKitTransport.
+Commit 3: LLM tool calling (check_availability/book_table) against Supabase.
 """
 
 import asyncio
 import os
 import sys
+from datetime import date
 
 from dotenv import load_dotenv
 from loguru import logger
 
 load_dotenv()
 
-# Required through commit 2 (LiveKitTransport + STT/LLM/TTS). Supabase vars
-# join this list once tool calling lands in commit 3.
 REQUIRED_VARS = [
     "LIVEKIT_URL",
     "LIVEKIT_API_KEY",
@@ -22,15 +21,19 @@ REQUIRED_VARS = [
     "OPENAI_API_KEY",
     "DEEPGRAM_API_KEY",
     "CARTESIA_API_KEY",
+    "SUPABASE_URL",
+    "SUPABASE_KEY",
 ]
 
 HOST_SYSTEM_PROMPT = (
     "You are the host at Bella Vista, an Italian restaurant serving "
     "wood-fired Neapolitan pizza and handmade pasta. Located at 12 Market "
-    "Street, open Tuesday-Sunday 5pm-10pm (closed Mondays). Answer callers' "
-    "questions about the restaurant briefly and warmly. Your responses will "
-    "be spoken aloud, so avoid emojis, bullet points, or other formatting "
-    "that can't be spoken."
+    "Street, open Tuesday-Sunday 5pm-10pm (closed Mondays). Today's date is "
+    "{today}. Answer callers' questions about the restaurant briefly and "
+    "warmly. Use the check_availability tool before promising a table is "
+    "free, and book_table once the caller confirms a date, time, and party "
+    "size. Your responses will be spoken aloud, so avoid emojis, bullet "
+    "points, or other formatting that can't be spoken."
 )
 
 # Stock Cartesia voice, used if CARTESIA_VOICE_ID is unset.
@@ -66,6 +69,13 @@ async def run_bot() -> None:
     from pipecat.services.openai.llm import OpenAILLMService
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.workers.runner import WorkerRunner
+    from supabase import create_async_client
+
+    from db import book_table, check_availability
+
+    supabase_client = await create_async_client(
+        os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
+    )
 
     url, token, room_name = await configure()
 
@@ -88,7 +98,7 @@ async def run_bot() -> None:
         api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(
             model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
-            system_instruction=HOST_SYSTEM_PROMPT,
+            system_instruction=HOST_SYSTEM_PROMPT.format(today=date.today().isoformat()),
         ),
     )
     tts = CartesiaTTSService(
@@ -98,9 +108,9 @@ async def run_bot() -> None:
         ),
     )
 
-    # No tools yet (commit 3); barge-in is configured here via vad_analyzer,
-    # not on the transport (LiveKitParams has no vad_analyzer field).
-    context = LLMContext()
+    # Barge-in is configured here via vad_analyzer, not on the transport
+    # (LiveKitParams has no vad_analyzer field).
+    context = LLMContext(tools=[check_availability, book_table])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -118,7 +128,13 @@ async def run_bot() -> None:
         ]
     )
 
-    worker = PipelineWorker(pipeline, params=PipelineParams(enable_metrics=True))
+    # app_resources is how tool handlers (db.py) reach the shared Supabase
+    # client -- see FunctionCallParams.app_resources.
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(enable_metrics=True),
+        app_resources=supabase_client,
+    )
 
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(transport, participant_id):
