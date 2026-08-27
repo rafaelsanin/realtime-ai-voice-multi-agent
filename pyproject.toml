@@ -6,6 +6,19 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pipecat-ai[cartesia,deepgram,livekit,openai]>=1.8.0",
+    "pydantic-settings>=2.7.0",
     "python-dotenv>=1.2.3",
     "supabase>=2.31.0",
 ]
+
+[dependency-groups]
+dev = ["mypy>=1.14.0"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["bot.py", "db.py", "reservations.py", "settings.py", "workers.py"]
+# pipecat/livekit/supabase ship partial or no stubs; checking our own code
+# against them is still useful, but their internals shouldn't fail the run.
+ignore_missing_imports = true
+disallow_untyped_defs = true
+warn_unused_ignores = true

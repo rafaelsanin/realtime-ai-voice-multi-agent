@@ -6,16 +6,25 @@ wraps an LLM persona plus its own tools and exchanges frames with that shared
 context over the WorkerBus (bridged=()). Only one worker is "active" at a
 time; activate_worker() swaps which one processes the shared context, so
 handoff carries no separate context to sync.
+
+Commit 6: typed, and BookingWorker now takes a ReservationsRepository
+constructor argument (Dependency Inversion) instead of reaching into
+`params.app_resources` for a raw Supabase client.
 """
+
+from __future__ import annotations
+
+from typing import Any
 
 from livekit import api as lk_api
 from pipecat.frames.frames import LLMRunFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.workers.llm import LLMWorker, tool
 
-from db import book_table as db_book_table
-from db import check_availability as db_check_availability
+import db
+from reservations import ReservationsRepository
 
 
 class _HandoffWorker(LLMWorker):
@@ -25,13 +34,13 @@ class _HandoffWorker(LLMWorker):
         self,
         name: str,
         *,
-        llm,
+        llm: LLMService[Any],
         main_worker: PipelineWorker,
         voice_id: str,
         room_name: str,
         livekit_api: lk_api.LiveKitAPI,
         active: bool = False,
-    ):
+    ) -> None:
         super().__init__(name, llm=llm, active=active, bridged=())
         self._main_worker = main_worker
         self._voice_id = voice_id
@@ -65,7 +74,7 @@ class _HandoffWorker(LLMWorker):
         await self.activate_worker(target, deactivate_self=True)
 
     @tool
-    async def end_conversation(self, params):
+    async def end_conversation(self, params: FunctionCallParams) -> None:
         """End the call. Call this once the caller is done and says goodbye."""
         await params.result_callback({"ended": True})
         # Stopping the pipeline alone doesn't hang up a PSTN call -- the SIP
@@ -73,6 +82,8 @@ class _HandoffWorker(LLMWorker):
         # explicitly removed. Deleting the room disconnects everyone in it,
         # which tears down the SIP leg too.
         await self._livekit_api.room.delete_room(lk_api.DeleteRoomRequest(room=self._room_name))
+        # Always set while a tool handler runs; mypy only sees the optional field.
+        assert params.worker_runner is not None
         await params.worker_runner.end(reason="caller said goodbye")
 
 
@@ -80,7 +91,7 @@ class HostWorker(_HandoffWorker):
     """Greets callers and handles small talk/FAQ. Hands off to Booking for reservations."""
 
     @tool
-    async def transfer_to_booking(self, params):
+    async def transfer_to_booking(self, params: FunctionCallParams) -> None:
         """Hand off the conversation to the Booking agent.
 
         Call this as soon as the caller wants to check availability or book a
@@ -93,8 +104,14 @@ class HostWorker(_HandoffWorker):
 class BookingWorker(_HandoffWorker):
     """Owns check_availability/book_table. Hands back to Host for anything else."""
 
+    def __init__(self, *args: Any, repository: ReservationsRepository, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._repository = repository
+
     @tool
-    async def check_availability(self, params, date: str, time: str, party_size: int):
+    async def check_availability(
+        self, params: FunctionCallParams, date: str, time: str, party_size: int
+    ) -> None:
         """Check whether a table is available for a given date, time, and party size.
 
         Args:
@@ -102,10 +119,15 @@ class BookingWorker(_HandoffWorker):
             time: Reservation time, formatted as HH:MM (24-hour).
             party_size: Number of guests.
         """
-        await db_check_availability(params, date=date, time=time, party_size=party_size)
+        result = await db.check_availability(
+            self._repository, date=date, time=time, party_size=party_size
+        )
+        await params.result_callback(result.model_dump())
 
     @tool
-    async def book_table(self, params, name: str, date: str, time: str, party_size: int):
+    async def book_table(
+        self, params: FunctionCallParams, name: str, date: str, time: str, party_size: int
+    ) -> None:
         """Book a table for a caller, if the slot still has capacity.
 
         Args:
@@ -114,10 +136,13 @@ class BookingWorker(_HandoffWorker):
             time: Reservation time, formatted as HH:MM (24-hour).
             party_size: Number of guests.
         """
-        await db_book_table(params, name=name, date=date, time=time, party_size=party_size)
+        result = await db.book_table(
+            self._repository, name=name, date=date, time=time, party_size=party_size
+        )
+        await params.result_callback(result.model_dump())
 
     @tool
-    async def transfer_to_host(self, params):
+    async def transfer_to_host(self, params: FunctionCallParams) -> None:
         """Hand off back to the Host agent for anything not booking-related.
 
         Call this once the caller's booking-related request is fully handled,

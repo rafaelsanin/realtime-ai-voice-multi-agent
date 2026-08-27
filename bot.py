@@ -1,29 +1,30 @@
 """Bella Vista voice bot entrypoint.
 
-Commit 4: multi-agent handoff (Host/Booking) with shared context retention.
+Commit 6: wraps pipeline/worker construction in BellaVistaBot, taking a
+Settings object (settings.py) instead of reading os.environ ad hoc -- the
+class half of this commit's dependency injection (Settings is the other).
 """
 
+from __future__ import annotations
+
 import asyncio
-import os
 import sys
 from datetime import date
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 from loguru import logger
 
-load_dotenv()
+from settings import LogFormat, Settings, load_settings
 
-REQUIRED_VARS = [
-    "LIVEKIT_URL",
-    "LIVEKIT_API_KEY",
-    "LIVEKIT_API_SECRET",
-    "LIVEKIT_ROOM_NAME",
-    "OPENAI_API_KEY",
-    "DEEPGRAM_API_KEY",
-    "CARTESIA_API_KEY",
-    "SUPABASE_URL",
-    "SUPABASE_KEY",
-]
+if TYPE_CHECKING:
+    from livekit import api as lk_api
+    from pipecat.pipeline.worker import PipelineWorker
+
+    from reservations import ReservationsRepository
+    from workers import BookingWorker, HostWorker
+
+load_dotenv()
 
 HOST_SYSTEM_PROMPT = (
     "You are the host at Bella Vista, an Italian restaurant serving "
@@ -59,174 +60,221 @@ DEFAULT_HOST_VOICE_ID = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"  # Skylar
 DEFAULT_BOOKING_VOICE_ID = "62ae83ad-4f6a-430b-af41-a9bede9286ca"  # Gemma
 
 
-def check_env() -> bool:
-    """Print any missing required env vars. Returns True if all are present."""
-    missing = [name for name in REQUIRED_VARS if not os.getenv(name)]
-    if missing:
-        print(f"missing: {', '.join(missing)}")
-        return False
-    return True
+def configure_logging(settings: Settings) -> None:
+    """Human-readable console logs locally, structured JSON on a cloud deployment.
+
+    A container platform's log collector (for a log drain to Datadog,
+    CloudWatch, etc.) just captures stdout as opaque text by default -- JSON
+    lines let it parse fields like `event`/`room`/`participant` instead of
+    grepping free text.
+    """
+    logger.remove()
+    if settings.effective_log_format is LogFormat.JSON:
+        logger.add(sys.stdout, serialize=True, level="INFO")
+    else:
+        logger.add(sys.stdout, level="INFO")
 
 
-async def run_bot() -> None:
-    # Imported lazily so `check_env()` can fail fast without pulling in the
-    # (heavier) pipeline dependencies first.
-    from urllib.parse import urlencode
+class BellaVistaBot:
+    """Builds and runs the Host/Booking pipeline for one call session."""
 
-    from pipecat.audio.vad.silero import SileroVADAnalyzer
-    from pipecat.bus import BusBridgeProcessor
-    from pipecat.frames.frames import LLMRunFrame
-    from pipecat.pipeline.pipeline import Pipeline
-    from pipecat.pipeline.worker import PipelineParams, PipelineWorker
-    from pipecat.processors.aggregators.llm_context import LLMContext
-    from pipecat.processors.aggregators.llm_response_universal import (
-        LLMContextAggregatorPair,
-        LLMUserAggregatorParams,
-    )
-    from pipecat.runner.livekit import configure, generate_token, livekit_credentials
-    from pipecat.services.cartesia.tts import CartesiaTTSService
-    from pipecat.services.deepgram.stt import DeepgramSTTService
-    from pipecat.services.openai.llm import OpenAILLMService
-    from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
-    from pipecat.workers.runner import WorkerRunner
-    from supabase import create_async_client
-    from livekit import api as lk_api
-    from livekit import rtc
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
 
-    from workers import BookingWorker, HostWorker
+    async def run(self) -> None:
+        # Imported lazily so a missing/invalid Settings can fail fast without
+        # pulling in the (heavier) pipeline dependencies first.
+        from urllib.parse import urlencode
 
-    supabase_client = await create_async_client(
-        os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
-    )
-
-    url, token, room_name = await configure()
-
-    # Used by end_conversation to delete the room on hangup -- for PSTN
-    # calls, stopping the pipeline alone leaves the SIP participant (and the
-    # call, and Twilio's per-minute billing) connected.
-    livekit_api = lk_api.LiveKitAPI(url, os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
-
-    # A ready-to-click meet.livekit.io test link, so joining doesn't require
-    # manually copy-pasting the URL/token into the custom-connection form.
-    _, api_key, api_secret = livekit_credentials()
-    user_token = generate_token(room_name, "User", api_key, api_secret)
-    test_link = f"https://meet.livekit.io/custom?{urlencode({'liveKitUrl': url, 'token': user_token})}"
-    logger.info(f"Join to test: {test_link}")
-
-    transport = LiveKitTransport(
-        url,
-        token,
-        room_name,
-        params=LiveKitParams(audio_in_enabled=True, audio_out_enabled=True),
-    )
-
-    stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
-    tts = CartesiaTTSService(
-        api_key=os.environ["CARTESIA_API_KEY"],
-        settings=CartesiaTTSService.Settings(
-            voice=os.getenv("CARTESIA_VOICE_ID") or DEFAULT_HOST_VOICE_ID,
-        ),
-    )
-
-    # Barge-in is configured here via vad_analyzer, not on the transport
-    # (LiveKitParams has no vad_analyzer field). This context is the only one
-    # in the whole session -- Host/Booking never get their own -- which is
-    # what gives context retention across the handoff below.
-    context = LLMContext()
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
-    )
-
-    runner = WorkerRunner()
-
-    # Sits where the LLM used to be: forwards frames to whichever agent
-    # worker is currently active, and forwards that worker's output back.
-    bridge = BusBridgeProcessor(bus=runner.bus, worker_name="main")
-
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            user_aggregator,
-            bridge,
-            tts,
-            transport.output(),
-            assistant_aggregator,
-        ]
-    )
-    main_worker = PipelineWorker(pipeline, name="main", params=PipelineParams(enable_metrics=True))
-
-    today = date.today().isoformat()
-    host_llm = OpenAILLMService(
-        api_key=os.environ["OPENAI_API_KEY"],
-        settings=OpenAILLMService.Settings(
-            model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
-            system_instruction=HOST_SYSTEM_PROMPT.format(today=today),
-        ),
-    )
-    booking_llm = OpenAILLMService(
-        api_key=os.environ["OPENAI_API_KEY"],
-        settings=OpenAILLMService.Settings(
-            model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
-            system_instruction=BOOKING_SYSTEM_PROMPT.format(today=today),
-        ),
-    )
-    host_worker = HostWorker(
-        "host",
-        llm=host_llm,
-        main_worker=main_worker,
-        voice_id=os.getenv("CARTESIA_VOICE_ID") or DEFAULT_HOST_VOICE_ID,
-        room_name=room_name,
-        livekit_api=livekit_api,
-        active=True,
-    )
-    booking_worker = BookingWorker(
-        "booking",
-        llm=booking_llm,
-        main_worker=main_worker,
-        voice_id=os.getenv("CARTESIA_BOOKING_VOICE_ID") or DEFAULT_BOOKING_VOICE_ID,
-        room_name=room_name,
-        livekit_api=livekit_api,
-        active=False,
-    )
-    # LLMWorker's constructor doesn't take app_resources -- set it directly so
-    # check_availability/book_table (db.py) can reach it via
-    # FunctionCallParams.app_resources.
-    booking_worker._app_resources = supabase_client
-
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(transport, participant_id):
-        logger.info(f"First participant joined: {participant_id}")
-        context.add_message(
-            {"role": "developer", "content": "Greet the caller and introduce yourself briefly."}
+        from livekit import api as lk_api
+        from livekit import rtc
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.bus import BusBridgeProcessor
+        from pipecat.frames.frames import LLMRunFrame
+        from pipecat.pipeline.pipeline import Pipeline
+        from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import (
+            LLMContextAggregatorPair,
+            LLMUserAggregatorParams,
         )
-        await main_worker.queue_frames([LLMRunFrame()])
+        from pipecat.runner.livekit import configure, generate_token, livekit_credentials
+        from pipecat.services.cartesia.tts import CartesiaTTSService
+        from pipecat.services.deepgram.stt import DeepgramSTTService
+        from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
+        from pipecat.workers.runner import WorkerRunner
+        from supabase import create_async_client
 
-    @transport.event_handler("on_participant_connected")
-    async def on_participant_connected(transport, participant):
-        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            logger.info(f"SIP participant joined: {participant.identity}")
+        from reservations import SupabaseReservationsRepository
 
-    @transport.event_handler("on_participant_disconnected")
-    async def on_participant_disconnected(transport, participant_id):
-        logger.info(f"Participant disconnected: {participant_id}")
-        await runner.cancel()
+        settings = self._settings
 
-    await runner.add_workers(main_worker, host_worker, booking_worker)
-    try:
-        await runner.run()
-    finally:
-        await livekit_api.aclose()
+        supabase_client = await create_async_client(settings.supabase_url, settings.supabase_key)
+        repository = SupabaseReservationsRepository(supabase_client)
+
+        url, token, room_name = await configure()
+
+        # Used by end_conversation to delete the room on hangup -- for PSTN
+        # calls, stopping the pipeline alone leaves the SIP participant (and
+        # the call, and Twilio's per-minute billing) connected.
+        livekit_api = lk_api.LiveKitAPI(url, settings.livekit_api_key, settings.livekit_api_secret)
+
+        if settings.is_local:
+            # A ready-to-click meet.livekit.io test link, so joining doesn't
+            # require manually copy-pasting the URL/token into the
+            # custom-connection form. Not useful once deployed (nobody reads
+            # container logs to find a link to join a call already in
+            # progress), so skip it on a cloud deployment.
+            _, api_key, api_secret = livekit_credentials()
+            user_token = generate_token(room_name, "User", api_key, api_secret)
+            test_link = (
+                f"https://meet.livekit.io/custom?{urlencode({'liveKitUrl': url, 'token': user_token})}"
+            )
+            logger.info(f"Join to test: {test_link}")
+
+        transport = LiveKitTransport(
+            url,
+            token,
+            room_name,
+            params=LiveKitParams(audio_in_enabled=True, audio_out_enabled=True),
+        )
+
+        stt = DeepgramSTTService(api_key=settings.deepgram_api_key)
+        tts = CartesiaTTSService(
+            api_key=settings.cartesia_api_key,
+            settings=CartesiaTTSService.Settings(
+                voice=settings.cartesia_voice_id or DEFAULT_HOST_VOICE_ID,
+            ),
+        )
+
+        # Barge-in is configured here via vad_analyzer, not on the transport
+        # (LiveKitParams has no vad_analyzer field). This context is the only
+        # one in the whole session -- Host/Booking never get their own --
+        # which is what gives context retention across the handoff below.
+        context = LLMContext()
+        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        )
+
+        runner = WorkerRunner()
+
+        # Sits where the LLM used to be: forwards frames to whichever agent
+        # worker is currently active, and forwards that worker's output back.
+        bridge = BusBridgeProcessor(bus=runner.bus, worker_name="main")
+
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                stt,
+                user_aggregator,
+                bridge,
+                tts,
+                transport.output(),
+                assistant_aggregator,
+            ]
+        )
+        main_worker = PipelineWorker(pipeline, name="main", params=PipelineParams(enable_metrics=True))
+
+        host_worker, booking_worker = self._build_workers(
+            main_worker=main_worker,
+            room_name=room_name,
+            livekit_api=livekit_api,
+            repository=repository,
+        )
+
+        @transport.event_handler("on_first_participant_joined")
+        async def on_first_participant_joined(
+            transport: LiveKitTransport, participant_id: str
+        ) -> None:
+            logger.info(f"First participant joined: {participant_id}")
+            context.add_message(
+                {"role": "developer", "content": "Greet the caller and introduce yourself briefly."}
+            )
+            await main_worker.queue_frames([LLMRunFrame()])
+
+        @transport.event_handler("on_participant_connected")
+        async def on_participant_connected(
+            transport: LiveKitTransport, participant: rtc.RemoteParticipant
+        ) -> None:
+            if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+                logger.info(f"SIP participant joined: {participant.identity}")
+
+        @transport.event_handler("on_participant_disconnected")
+        async def on_participant_disconnected(
+            transport: LiveKitTransport, participant_id: str
+        ) -> None:
+            logger.info(f"Participant disconnected: {participant_id}")
+            await runner.cancel()
+
+        await runner.add_workers(main_worker, host_worker, booking_worker)
+        try:
+            await runner.run()
+        finally:
+            await livekit_api.aclose()
+
+    def _build_workers(
+        self,
+        *,
+        main_worker: "PipelineWorker",
+        room_name: str,
+        livekit_api: "lk_api.LiveKitAPI",
+        repository: ReservationsRepository,
+    ) -> tuple["HostWorker", "BookingWorker"]:
+        """Construct the Host/Booking `LLMWorker`s and their per-persona LLM services."""
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        from workers import BookingWorker, HostWorker
+
+        settings = self._settings
+        today = date.today().isoformat()
+
+        host_llm = OpenAILLMService(
+            api_key=settings.openai_api_key,
+            settings=OpenAILLMService.Settings(
+                model=settings.openai_model,
+                system_instruction=HOST_SYSTEM_PROMPT.format(today=today),
+            ),
+        )
+        booking_llm = OpenAILLMService(
+            api_key=settings.openai_api_key,
+            settings=OpenAILLMService.Settings(
+                model=settings.openai_model,
+                system_instruction=BOOKING_SYSTEM_PROMPT.format(today=today),
+            ),
+        )
+        host_worker = HostWorker(
+            "host",
+            llm=host_llm,
+            main_worker=main_worker,
+            voice_id=settings.cartesia_voice_id or DEFAULT_HOST_VOICE_ID,
+            room_name=room_name,
+            livekit_api=livekit_api,
+            active=True,
+        )
+        booking_worker = BookingWorker(
+            "booking",
+            llm=booking_llm,
+            main_worker=main_worker,
+            voice_id=settings.cartesia_booking_voice_id or DEFAULT_BOOKING_VOICE_ID,
+            room_name=room_name,
+            livekit_api=livekit_api,
+            repository=repository,
+            active=False,
+        )
+        return host_worker, booking_worker
 
 
 def main() -> int:
-    if not check_env():
+    settings = load_settings()
+    if settings is None:
         return 1
-    asyncio.run(run_bot())
+    configure_logging(settings)
+    asyncio.run(BellaVistaBot(settings).run())
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
