@@ -1,0 +1,5 @@
+{
+  "dispatch_rule": {
+    "rule": { "dispatchRuleDirect": { "roomName": "bella-vista-line" } }
+  }
+}

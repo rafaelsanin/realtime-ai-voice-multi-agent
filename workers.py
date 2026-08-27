@@ -8,6 +8,7 @@ time; activate_worker() swaps which one processes the shared context, so
 handoff carries no separate context to sync.
 """
 
+from livekit import api as lk_api
 from pipecat.frames.frames import LLMRunFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -27,11 +28,15 @@ class _HandoffWorker(LLMWorker):
         llm,
         main_worker: PipelineWorker,
         voice_id: str,
+        room_name: str,
+        livekit_api: lk_api.LiveKitAPI,
         active: bool = False,
     ):
         super().__init__(name, llm=llm, active=active, bridged=())
         self._main_worker = main_worker
         self._voice_id = voice_id
+        self._room_name = room_name
+        self._livekit_api = livekit_api
         # activate_worker() is deferred until the calling tool call fully
         # returns (LLMWorker runs it via _after_tool_calls), so nudging the
         # newly active worker has to happen from *its own* on_activated, not
@@ -63,6 +68,11 @@ class _HandoffWorker(LLMWorker):
     async def end_conversation(self, params):
         """End the call. Call this once the caller is done and says goodbye."""
         await params.result_callback({"ended": True})
+        # Stopping the pipeline alone doesn't hang up a PSTN call -- the SIP
+        # participant stays in the room (and Twilio keeps billing) until it's
+        # explicitly removed. Deleting the room disconnects everyone in it,
+        # which tears down the SIP leg too.
+        await self._livekit_api.room.delete_room(lk_api.DeleteRoomRequest(room=self._room_name))
         await params.worker_runner.end(reason="caller said goodbye")
 
 

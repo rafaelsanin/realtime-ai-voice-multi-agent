@@ -1,0 +1,9 @@
+{
+  "trunk": {
+    "name": "twilio-inbound",
+    "numbers": ["REDACTED"],
+    "media": {
+      "mediaTimeout": "60s"
+    }
+  }
+}

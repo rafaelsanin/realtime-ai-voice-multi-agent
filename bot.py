@@ -90,6 +90,8 @@ async def run_bot() -> None:
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.workers.runner import WorkerRunner
     from supabase import create_async_client
+    from livekit import api as lk_api
+    from livekit import rtc
 
     from workers import BookingWorker, HostWorker
 
@@ -98,6 +100,11 @@ async def run_bot() -> None:
     )
 
     url, token, room_name = await configure()
+
+    # Used by end_conversation to delete the room on hangup -- for PSTN
+    # calls, stopping the pipeline alone leaves the SIP participant (and the
+    # call, and Twilio's per-minute billing) connected.
+    livekit_api = lk_api.LiveKitAPI(url, os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
 
     # A ready-to-click meet.livekit.io test link, so joining doesn't require
     # manually copy-pasting the URL/token into the custom-connection form.
@@ -170,6 +177,8 @@ async def run_bot() -> None:
         llm=host_llm,
         main_worker=main_worker,
         voice_id=os.getenv("CARTESIA_VOICE_ID") or DEFAULT_HOST_VOICE_ID,
+        room_name=room_name,
+        livekit_api=livekit_api,
         active=True,
     )
     booking_worker = BookingWorker(
@@ -177,6 +186,8 @@ async def run_bot() -> None:
         llm=booking_llm,
         main_worker=main_worker,
         voice_id=os.getenv("CARTESIA_BOOKING_VOICE_ID") or DEFAULT_BOOKING_VOICE_ID,
+        room_name=room_name,
+        livekit_api=livekit_api,
         active=False,
     )
     # LLMWorker's constructor doesn't take app_resources -- set it directly so
@@ -192,13 +203,21 @@ async def run_bot() -> None:
         )
         await main_worker.queue_frames([LLMRunFrame()])
 
+    @transport.event_handler("on_participant_connected")
+    async def on_participant_connected(transport, participant):
+        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            logger.info(f"SIP participant joined: {participant.identity}")
+
     @transport.event_handler("on_participant_disconnected")
     async def on_participant_disconnected(transport, participant_id):
         logger.info(f"Participant disconnected: {participant_id}")
         await runner.cancel()
 
     await runner.add_workers(main_worker, host_worker, booking_worker)
-    await runner.run()
+    try:
+        await runner.run()
+    finally:
+        await livekit_api.aclose()
 
 
 def main() -> int:
