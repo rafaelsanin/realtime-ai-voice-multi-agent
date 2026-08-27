@@ -1,0 +1,11 @@
+[project]
+name = "bella-vista-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pipecat-ai[cartesia,deepgram,livekit,openai]>=1.8.0",
+    "python-dotenv>=1.2.3",
+    "supabase>=2.31.0",
+]

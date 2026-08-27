@@ -1,0 +1,25 @@
+{
+  "inputs": [
+    {
+      "id": "twilio-creds",
+      "type": "promptString",
+      "description": "Twilio credentials as ACCOUNT_SID/API_KEY:API_SECRET (see https://www.twilio.com/docs/iam/api-keys)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "supabase": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp"
+    },
+    "twilio": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@twilio-alpha/mcp", "${input:twilio-creds}"]
+    },
+    "livekit-docs": {
+      "type": "http",
+      "url": "https://docs.livekit.io/mcp/"
+    }
+  }
+}
