@@ -1,0 +1,13 @@
+flowchart TD
+    In["transport.input()"] --> STT["Deepgram STT"]
+    STT --> UA["user aggregator<br/>(+ Silero VAD)"]
+    UA --> Bridge["BusBridgeProcessor"]
+    Bridge --> TTS["Cartesia TTS"]
+    TTS --> Out["transport.output()"]
+    Out --> AA["assistant aggregator"]
+
+    Bridge <-.->|WorkerBus| Host["Host worker"]
+    Bridge <-.->|WorkerBus| Booking["Booking worker"]
+
+    UA --- Ctx[("shared LLMContext")]
+    AA --- Ctx

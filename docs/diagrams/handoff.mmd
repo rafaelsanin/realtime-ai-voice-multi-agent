@@ -1,0 +1,23 @@
+sequenceDiagram
+    actor Caller
+    participant Host
+    participant Booking
+    participant DB as Supabase
+
+    Caller->>Host: "What time do you close?"
+    Host-->>Caller: "Ten, Tuesday through Sunday."
+    Caller->>Host: "Can I book a table for four?"
+    Host->>Booking: transfer_to_booking()
+    Note over Host,Booking: shared context carries over,<br/>voice switches audibly
+    Booking-->>Caller: "Sure — what day?"
+    Caller->>Booking: "Friday at seven."
+    Booking->>DB: check_availability(...)
+    DB-->>Booking: available
+    Booking-->>Caller: "That works. Under what name?"
+    Caller->>Booking: "Rafael."
+    Booking->>DB: book_table(...)
+    DB-->>Booking: reservation id
+    Booking-->>Caller: "Booked. See you Friday."
+    Caller->>Booking: "Thanks, bye."
+    Booking->>Booking: end_conversation()
+    Note over Booking: deletes the room —<br/>SIP leg drops, phone hangs up

@@ -1,0 +1,10 @@
+flowchart TD
+    Start(["start"]) --> Fly{"FLY_APP_NAME set?"}
+    Fly -->|yes| FlyIO["deployment = fly_io"]
+    Fly -->|no| ECS{"ECS_CONTAINER_METADATA_URI_V4 set?"}
+    ECS -->|yes| AWS["deployment = aws_ecs"]
+    ECS -->|no| Local["deployment = local"]
+
+    FlyIO --> Json["JSON logs,<br/>no test link"]
+    AWS --> Json
+    Local --> Console["console logs,<br/>prints browser test link"]

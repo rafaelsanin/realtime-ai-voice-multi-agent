@@ -1,0 +1,36 @@
+flowchart LR
+    subgraph Callers
+        Phone["Phone caller"]
+        Browser["Browser<br/>(meet.livekit.io)"]
+    end
+
+    subgraph Telephony
+        Twilio["Twilio<br/>Elastic SIP Trunk"]
+        LKSIP["LiveKit SIP<br/>inbound trunk + dispatch rule"]
+    end
+
+    Room["LiveKit Cloud room<br/>bella-vista-line"]
+
+    subgraph Bot["Bot process (container)"]
+        Pipeline["Pipecat pipeline"]
+        Host["Host agent"]
+        Booking["Booking agent"]
+    end
+
+    subgraph Providers
+        DG["Deepgram<br/>STT"]
+        OAI["OpenAI<br/>LLM"]
+        CTS["Cartesia<br/>TTS"]
+        SB["Supabase<br/>Postgres"]
+    end
+
+    Phone -->|PSTN| Twilio -->|SIP/TCP| LKSIP --> Room
+    Browser -->|WebRTC| Room
+    Room <-->|WebRTC audio| Pipeline
+    Pipeline --> DG
+    Pipeline --> CTS
+    Pipeline <--> Host
+    Pipeline <--> Booking
+    Host --> OAI
+    Booking --> OAI
+    Booking --> SB
