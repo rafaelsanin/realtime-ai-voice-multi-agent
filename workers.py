@@ -129,7 +129,7 @@ class BookingWorker(_HandoffWorker):
         result = await db.check_availability(
             self._repository, date=date, time=time, party_size=party_size
         )
-        await params.result_callback(result.model_dump())
+        await params.result_callback(result.model_dump(mode="json"))
 
     @tool
     async def book_table(
@@ -146,7 +146,8 @@ class BookingWorker(_HandoffWorker):
         result = await db.book_table(
             self._repository, name=name, date=date, time=time, party_size=party_size
         )
-        await params.result_callback(result.model_dump())
+        # mode="json" so the reservation UUID reaches the LLM as a string.
+        await params.result_callback(result.model_dump(mode="json"))
 
     @tool
     async def transfer_to_host(self, params: FunctionCallParams) -> None:

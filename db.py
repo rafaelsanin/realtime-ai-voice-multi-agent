@@ -7,6 +7,8 @@ results instead of raw dicts.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from loguru import logger
 from pydantic import BaseModel
 
@@ -28,7 +30,7 @@ class BookingResult(BaseModel):
     """Result of a book_table tool call."""
 
     booked: bool
-    reservation_id: int | None = None
+    reservation_id: UUID | None = None
     reason: str | None = None
 
 

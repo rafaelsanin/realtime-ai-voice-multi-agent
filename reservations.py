@@ -10,6 +10,7 @@ tests) could implement the same Protocol without touching `db.py` or
 from __future__ import annotations
 
 from typing import Any, Protocol, cast
+from uuid import UUID
 
 from pydantic import BaseModel
 from supabase import AsyncClient
@@ -18,7 +19,7 @@ from supabase import AsyncClient
 class Reservation(BaseModel):
     """A single booked table."""
 
-    id: int
+    id: UUID
     name: str
     date: str
     time: str
