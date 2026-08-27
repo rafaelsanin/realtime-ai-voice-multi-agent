@@ -55,9 +55,12 @@ BOOKING_SYSTEM_PROMPT = (
 )
 
 # Stock Cartesia voices -- distinct female voices per agent so a handoff is
-# audible, not just inferred from what's being said. Overridable via env.
-DEFAULT_HOST_VOICE_ID = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"  # Skylar
-DEFAULT_BOOKING_VOICE_ID = "62ae83ad-4f6a-430b-af41-a9bede9286ca"  # Gemma
+# audible, not just inferred from what's being said. Both general-american
+# accent (not the previous British Booking voice, which sounded odd and less
+# intelligible over compressed phone audio) for clarity on a telephony call.
+# Overridable via env.
+DEFAULT_HOST_VOICE_ID = "f039066f-cdb7-45ed-b51d-1034ae2f04a0"  # Cindy Baker - Receptionist
+DEFAULT_BOOKING_VOICE_ID = "c894559e-d529-4d70-a6fb-3330ecf7ef6b"  # Iris - Friendly Specialist
 
 
 def configure_logging(settings: Settings) -> None:
