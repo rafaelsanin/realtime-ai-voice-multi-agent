@@ -1,0 +1,10 @@
+.venv/
+.git/
+.env
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+supabase/
+README.md
+PLAN.md

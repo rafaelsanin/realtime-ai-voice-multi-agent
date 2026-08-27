@@ -7,6 +7,7 @@ results instead of raw dicts.
 
 from __future__ import annotations
 
+from loguru import logger
 from pydantic import BaseModel
 
 from reservations import ReservationsRepository
@@ -49,6 +50,13 @@ async def check_availability(
         if available
         else f"Fully booked for that slot ({booked}/{MAX_COVERS_PER_SLOT} covers already reserved)."
     )
+    logger.bind(
+        event="availability_checked",
+        date=date,
+        time=time,
+        party_size=party_size,
+        available=available,
+    ).info("availability checked")
     return AvailabilityResult(available=available, reason=reason)
 
 
@@ -66,10 +74,20 @@ async def book_table(
     """
     booked = await repository.booked_covers(date, time)
     if booked + party_size > MAX_COVERS_PER_SLOT:
+        logger.bind(event="booking_rejected", date=date, time=time, party_size=party_size).info(
+            "booking rejected: slot full"
+        )
         return BookingResult(
             booked=False,
             reason=f"Fully booked for that slot ({booked}/{MAX_COVERS_PER_SLOT} covers already reserved).",
         )
 
     reservation = await repository.create(name=name, date=date, time=time, party_size=party_size)
+    logger.bind(
+        event="booking_created",
+        reservation_id=reservation.id,
+        date=date,
+        time=time,
+        party_size=party_size,
+    ).info("booking created")
     return BookingResult(booked=True, reservation_id=reservation.id)

@@ -91,6 +91,7 @@ class BellaVistaBot:
         from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.bus import BusBridgeProcessor
         from pipecat.frames.frames import LLMRunFrame
+        from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
         from pipecat.processors.aggregators.llm_context import LLMContext
@@ -174,7 +175,14 @@ class BellaVistaBot:
                 assistant_aggregator,
             ]
         )
-        main_worker = PipelineWorker(pipeline, name="main", params=PipelineParams(enable_metrics=True))
+        # MetricsLogObserver logs the TTFB/processing-time frames enable_metrics=True
+        # already generates -- per-turn STT/LLM/TTS latency, for free.
+        main_worker = PipelineWorker(
+            pipeline,
+            name="main",
+            params=PipelineParams(enable_metrics=True),
+            observers=[MetricsLogObserver()],
+        )
 
         host_worker, booking_worker = self._build_workers(
             main_worker=main_worker,
@@ -187,7 +195,9 @@ class BellaVistaBot:
         async def on_first_participant_joined(
             transport: LiveKitTransport, participant_id: str
         ) -> None:
-            logger.info(f"First participant joined: {participant_id}")
+            logger.bind(event="call_started", room=room_name, participant=participant_id).info(
+                "call started"
+            )
             context.add_message(
                 {"role": "developer", "content": "Greet the caller and introduce yourself briefly."}
             )
@@ -198,13 +208,19 @@ class BellaVistaBot:
             transport: LiveKitTransport, participant: rtc.RemoteParticipant
         ) -> None:
             if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-                logger.info(f"SIP participant joined: {participant.identity}")
+                logger.bind(
+                    event="sip_participant_joined",
+                    room=room_name,
+                    participant=participant.identity,
+                ).info("SIP participant joined")
 
         @transport.event_handler("on_participant_disconnected")
         async def on_participant_disconnected(
             transport: LiveKitTransport, participant_id: str
         ) -> None:
-            logger.info(f"Participant disconnected: {participant_id}")
+            logger.bind(event="call_ended", room=room_name, participant=participant_id).info(
+                "participant disconnected"
+            )
             await runner.cancel()
 
         await runner.add_workers(main_worker, host_worker, booking_worker)

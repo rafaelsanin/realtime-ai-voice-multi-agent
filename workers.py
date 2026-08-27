@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from livekit import api as lk_api
+from loguru import logger
 from pipecat.frames.frames import LLMRunFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -71,11 +72,17 @@ class _HandoffWorker(LLMWorker):
         await self._main_worker.queue_frames([LLMRunFrame()])
 
     async def _handoff_to(self, target: str) -> None:
+        logger.bind(event="handoff", room=self._room_name, source=self.name, target=target).info(
+            "agent handoff"
+        )
         await self.activate_worker(target, deactivate_self=True)
 
     @tool
     async def end_conversation(self, params: FunctionCallParams) -> None:
         """End the call. Call this once the caller is done and says goodbye."""
+        logger.bind(event="call_ended", room=self._room_name, reason="caller_goodbye").info(
+            "ending call"
+        )
         await params.result_callback({"ended": True})
         # Stopping the pipeline alone doesn't hang up a PSTN call -- the SIP
         # participant stays in the room (and Twilio keeps billing) until it's
