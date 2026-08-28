@@ -10,6 +10,12 @@ handoff carries no separate context to sync.
 Commit 6: typed, and BookingWorker now takes a ReservationsRepository
 constructor argument (Dependency Inversion) instead of reaching into
 `params.app_resources` for a raw Supabase client.
+
+Fix: this is an always-on line, not a one-shot script -- end_conversation
+used to delete the whole room and end the WorkerRunner, which correctly hung
+up the call but also killed the bot's own connection and process. It now
+only removes the caller's SIP participant, tracked via CallState, so the
+process (and the room) survive to answer the next call.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.workers.llm import LLMWorker, tool
 
+from call_state import CallState
 import db
 from reservations import ReservationsRepository
 
@@ -40,6 +47,7 @@ class _HandoffWorker(LLMWorker):
         voice_id: str,
         room_name: str,
         livekit_api: lk_api.LiveKitAPI,
+        call_state: CallState,
         active: bool = False,
     ) -> None:
         super().__init__(name, llm=llm, active=active, bridged=())
@@ -47,6 +55,7 @@ class _HandoffWorker(LLMWorker):
         self._voice_id = voice_id
         self._room_name = room_name
         self._livekit_api = livekit_api
+        self._call_state = call_state
         # activate_worker() is deferred until the calling tool call fully
         # returns (LLMWorker runs it via _after_tool_calls), so nudging the
         # newly active worker has to happen from *its own* on_activated, not
@@ -76,6 +85,7 @@ class _HandoffWorker(LLMWorker):
             "agent handoff"
         )
         await self.activate_worker(target, deactivate_self=True)
+        self._call_state.active_worker = target
 
     @tool
     async def end_conversation(self, params: FunctionCallParams) -> None:
@@ -86,12 +96,14 @@ class _HandoffWorker(LLMWorker):
         await params.result_callback({"ended": True})
         # Stopping the pipeline alone doesn't hang up a PSTN call -- the SIP
         # participant stays in the room (and Twilio keeps billing) until it's
-        # explicitly removed. Deleting the room disconnects everyone in it,
-        # which tears down the SIP leg too.
-        await self._livekit_api.room.delete_room(lk_api.DeleteRoomRequest(room=self._room_name))
-        # Always set while a tool handler runs; mypy only sees the optional field.
-        assert params.worker_runner is not None
-        await params.worker_runner.end(reason="caller said goodbye")
+        # explicitly removed. Remove just the caller (not the whole room, and
+        # without ending the WorkerRunner) so the bot stays up for the next
+        # call -- this is a persistent line, not a one-shot script.
+        identity = self._call_state.participant_identity
+        if identity:
+            await self._livekit_api.room.remove_participant(
+                lk_api.RoomParticipantIdentity(room=self._room_name, identity=identity)
+            )
 
 
 class HostWorker(_HandoffWorker):

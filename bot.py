@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from livekit import api as lk_api
     from pipecat.pipeline.worker import PipelineWorker
 
+    from call_state import CallState
     from reservations import ReservationsRepository
     from workers import BookingWorker, HostWorker
 
@@ -90,7 +91,6 @@ class BellaVistaBot:
         from urllib.parse import urlencode
 
         from livekit import api as lk_api
-        from livekit import rtc
         from pipecat.audio.vad.silero import SileroVADAnalyzer
         from pipecat.bus import BusBridgeProcessor
         from pipecat.frames.frames import LLMRunFrame
@@ -109,18 +109,20 @@ class BellaVistaBot:
         from pipecat.workers.runner import WorkerRunner
         from supabase import create_async_client
 
+        from call_state import CallState
         from reservations import SupabaseReservationsRepository
 
         settings = self._settings
 
         supabase_client = await create_async_client(settings.supabase_url, settings.supabase_key)
         repository = SupabaseReservationsRepository(supabase_client)
+        call_state = CallState()
 
         url, token, room_name = await configure()
 
-        # Used by end_conversation to delete the room on hangup -- for PSTN
-        # calls, stopping the pipeline alone leaves the SIP participant (and
-        # the call, and Twilio's per-minute billing) connected.
+        # Used by end_conversation to remove just the caller on hangup -- for
+        # PSTN calls, stopping the pipeline alone leaves the SIP participant
+        # (and the call, and Twilio's per-minute billing) connected.
         livekit_api = lk_api.LiveKitAPI(url, settings.livekit_api_key, settings.livekit_api_secret)
 
         if settings.is_local:
@@ -192,6 +194,7 @@ class BellaVistaBot:
             room_name=room_name,
             livekit_api=livekit_api,
             repository=repository,
+            call_state=call_state,
         )
 
         @transport.event_handler("on_first_participant_joined")
@@ -201,21 +204,11 @@ class BellaVistaBot:
             logger.bind(event="call_started", room=room_name, participant=participant_id).info(
                 "call started"
             )
+            call_state.participant_identity = participant_id
             context.add_message(
                 {"role": "developer", "content": "Greet the caller and introduce yourself briefly."}
             )
             await main_worker.queue_frames([LLMRunFrame()])
-
-        @transport.event_handler("on_participant_connected")
-        async def on_participant_connected(
-            transport: LiveKitTransport, participant: rtc.RemoteParticipant
-        ) -> None:
-            if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-                logger.bind(
-                    event="sip_participant_joined",
-                    room=room_name,
-                    participant=participant.identity,
-                ).info("SIP participant joined")
 
         @transport.event_handler("on_participant_disconnected")
         async def on_participant_disconnected(
@@ -224,7 +217,15 @@ class BellaVistaBot:
             logger.bind(event="call_ended", room=room_name, participant=participant_id).info(
                 "participant disconnected"
             )
-            await runner.cancel()
+            # This is a persistent line, not a one-shot script -- reset for
+            # the next caller instead of tearing down the runner/process.
+            # (fresh conversation; next on_first_participant_joined greets
+            # again once someone new dials in).
+            context.set_messages([])
+            if call_state.active_worker != "host":
+                await main_worker.activate_worker("host")
+                call_state.active_worker = "host"
+            call_state.participant_identity = None
 
         await runner.add_workers(main_worker, host_worker, booking_worker)
         try:
@@ -239,6 +240,7 @@ class BellaVistaBot:
         room_name: str,
         livekit_api: "lk_api.LiveKitAPI",
         repository: ReservationsRepository,
+        call_state: "CallState",
     ) -> tuple["HostWorker", "BookingWorker"]:
         """Construct the Host/Booking `LLMWorker`s and their per-persona LLM services."""
         from pipecat.services.openai.llm import OpenAILLMService
@@ -269,6 +271,7 @@ class BellaVistaBot:
             voice_id=settings.cartesia_voice_id or DEFAULT_HOST_VOICE_ID,
             room_name=room_name,
             livekit_api=livekit_api,
+            call_state=call_state,
             active=True,
         )
         booking_worker = BookingWorker(
@@ -278,6 +281,7 @@ class BellaVistaBot:
             voice_id=settings.cartesia_booking_voice_id or DEFAULT_BOOKING_VOICE_ID,
             room_name=room_name,
             livekit_api=livekit_api,
+            call_state=call_state,
             repository=repository,
             active=False,
         )

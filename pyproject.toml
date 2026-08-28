@@ -16,7 +16,7 @@ dev = ["mypy>=1.14.0"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["bot.py", "db.py", "reservations.py", "settings.py", "workers.py"]
+files = ["bot.py", "call_state.py", "db.py", "reservations.py", "settings.py", "workers.py"]
 # pipecat/livekit/supabase ship partial or no stubs; checking our own code
 # against them is still useful, but their internals shouldn't fail the run.
 ignore_missing_imports = true
