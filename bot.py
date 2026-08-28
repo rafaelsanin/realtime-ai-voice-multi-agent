@@ -223,7 +223,10 @@ class BellaVistaBot:
             # again once someone new dials in).
             context.set_messages([])
             if call_state.active_worker != "host":
-                await main_worker.activate_worker("host")
+                # Don't let Host's on_activated speak into an empty room;
+                # the next caller's on_first_participant_joined greets.
+                host_worker.silence_next_activation()
+                await host_worker.activate_worker("host")
                 call_state.active_worker = "host"
             call_state.participant_identity = None
 
@@ -294,6 +297,12 @@ def main() -> int:
         return 1
     configure_logging(settings)
     asyncio.run(BellaVistaBot(settings).run())
+    # runner.run() is supposed to block for the life of the process. If it
+    # returns, the phone line is down -- exit non-zero on a cloud host so
+    # Fly's default on-failure policy (or restart=always) brings it back.
+    if not settings.is_local:
+        logger.error("pipeline ended unexpectedly; exiting so the host restarts the line")
+        return 1
     return 0
 
 

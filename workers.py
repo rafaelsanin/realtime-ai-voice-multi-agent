@@ -80,6 +80,10 @@ class _HandoffWorker(LLMWorker):
             return
         await self._main_worker.queue_frames([LLMRunFrame()])
 
+    def silence_next_activation(self) -> None:
+        """Activate without kicking off a spoken turn (empty room / hangup reset)."""
+        self._skip_next_nudge = True
+
     async def _handoff_to(self, target: str) -> None:
         logger.bind(event="handoff", room=self._room_name, source=self.name, target=target).info(
             "agent handoff"

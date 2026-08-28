@@ -24,7 +24,7 @@ native `LiveKitTransport`, with Twilio SIP trunking for PSTN.
 | Context retention | Conversation history survives the handoff — the new agent already knows what you said |
 | Distinct agent voices | Per-agent TTS voice switching, so a handoff is audible |
 | PSTN | Twilio Elastic SIP Trunk → LiveKit SIP → the same room the bot is in |
-| Graceful hangup | Ending the call deletes the room, tearing down the SIP leg (and its billing) |
+| Graceful hangup | Ending the call removes the SIP caller; the bot stays in the room for the next call |
 | Observability | Structured JSON audit events + per-turn STT/LLM/TTS latency metrics |
 
 ## Architecture

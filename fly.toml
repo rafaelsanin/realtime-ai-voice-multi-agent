@@ -10,6 +10,14 @@ primary_region = 'iad'
 
 # No [http_service] -- this is a single always-on worker holding one LiveKit
 # room open, not a web service; it doesn't listen on a port.
+#
+# fly deploy's default restart policy is on-failure, which does *not* restart
+# a machine that exits 0. A hangup used to take the process down that way
+# ("machine exited with exit code 0, not restarting"). Always restart so the
+# line comes back even if the pipeline still returns.
+
+[[restart]]
+  policy = "always"
 
 [[vm]]
   memory = '1gb'
