@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 .ruff_cache/
+# Rendered from inbound-trunk.json with the real number substituted in --
+# never commit the number itself (see README's Phone calls section).
+inbound-trunk.local.json

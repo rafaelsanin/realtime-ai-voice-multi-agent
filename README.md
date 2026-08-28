@@ -108,15 +108,27 @@ To dial the bot on a real number:
      stripped (`lk project list --json`). It is *not* the subdomain in your
      `LIVEKIT_URL`.
    - `;transport=tcp` is required. Without it, calls fail instantly.
-3. Create the LiveKit side:
+3. Create the LiveKit side. `inbound-trunk.json` is a template (the real
+   number is never committed) — render it from `.env`'s `TWILIO_PHONE_NUMBER`
+   first:
    ```sh
-   lk sip inbound create inbound-trunk.json
+   set -a; source .env; set +a
+   envsubst < inbound-trunk.json > inbound-trunk.local.json
+   lk sip inbound create inbound-trunk.local.json
    lk sip dispatch create dispatch-rule.json
    ```
-   `inbound-trunk.json` holds your phone number; `dispatch-rule.json` pins
-   every call to `LIVEKIT_ROOM_NAME`. The trunk sets a 60s media timeout,
-   since LiveKit otherwise drops calls that go quiet.
+   `inbound-trunk.local.json` (gitignored) holds your phone number;
+   `dispatch-rule.json` pins every call to `LIVEKIT_ROOM_NAME`. The trunk
+   sets a 60s media timeout, since LiveKit otherwise drops calls that go
+   quiet.
 4. Run the bot, then dial the number.
+
+**Attack surface note:** the inbound trunk's `numbers` list already scopes it
+to that one number, but LiveKit doesn't otherwise verify a call actually came
+through Twilio rather than a direct SIP request — that requires the
+`allowed_addresses` field (restrict to Twilio's signaling IPs), which is
+gated behind a LiveKit support request to enable for your project. Worth
+requesting before treating this as more than a demo.
 
 ## Deployment
 

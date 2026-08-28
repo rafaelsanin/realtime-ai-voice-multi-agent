@@ -1,7 +1,7 @@
 {
   "trunk": {
     "name": "twilio-inbound",
-    "numbers": ["REDACTED"],
+    "numbers": ["${TWILIO_PHONE_NUMBER}"],
     "media": {
       "mediaTimeout": "60s"
     }
