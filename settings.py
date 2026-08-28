@@ -68,7 +68,15 @@ class Settings(BaseSettings):
     livekit_url: str
     livekit_api_key: str
     livekit_api_secret: str
-    livekit_room_name: str
+    # Each inbound call gets its own room (commit 9), named by LiveKit's SIP
+    # dispatch rule as `<prefix>_<caller>_<random>`. The dispatcher treats
+    # every room starting with this prefix as a call to answer, so it has to
+    # match `dispatch-rule.json`'s roomPrefix.
+    livekit_room_prefix: str = Field(default="call", min_length=1)
+    # Concurrent calls one process will run. Each call is its own pipeline
+    # (VAD + STT + LLM + TTS), so this is really a sizing knob for the
+    # container: raise it with CPU, not on its own.
+    max_concurrent_calls: int = Field(default=3, ge=1)
 
     openai_api_key: str
     openai_model: str = "gpt-4o-mini"

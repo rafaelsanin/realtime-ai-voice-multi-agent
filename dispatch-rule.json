@@ -1,5 +1,6 @@
 {
   "dispatch_rule": {
-    "rule": { "dispatchRuleDirect": { "roomName": "bella-vista-line" } }
+    "name": "bella-vista-per-call",
+    "rule": { "dispatchRuleIndividual": { "roomPrefix": "call" } }
   }
 }

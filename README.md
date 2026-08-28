@@ -23,30 +23,39 @@ native `LiveKitTransport`, with Twilio SIP trunking for PSTN.
 | Multi-agent handoff | Two `LLMWorker`s swapping over a `WorkerBus`, one shared context |
 | Context retention | Conversation history survives the handoff — the new agent already knows what you said |
 | Distinct agent voices | Per-agent TTS voice switching, so a handoff is audible |
-| PSTN | Twilio Elastic SIP Trunk → LiveKit SIP → the same room the bot is in |
-| Graceful hangup | Ending the call removes the SIP caller; the bot stays in the room for the next call |
+| PSTN | Twilio Elastic SIP Trunk → LiveKit SIP → a room created for that call |
+| Concurrent calls | Per-call dispatch: one room, one `CallSession`, one pipeline per caller |
+| Graceful hangup | Ending the call removes the SIP caller; the process stays up for the next one |
 | Observability | Structured JSON audit events + per-turn STT/LLM/TTS latency metrics |
 
 ## Architecture
 
 ![Architecture](docs/diagrams/architecture.png)
 
-Every inbound call lands in one **fixed room**, and the bot is already sitting
-in it. That's what keeps the telephony side purely configuration — no per-call
-agent dispatch infrastructure.
+Each inbound call gets **its own LiveKit room**, named by the SIP dispatch rule
+(`call_<caller>_<random>`). `CallDispatcher` watches for those rooms and starts
+a `CallSession` per call: its own transport, STT/LLM/TTS services, `LLMContext`,
+Host/Booking workers and `WorkerRunner`. Two callers share nothing but the
+config object, the reservations repository and the LiveKit API client, so one
+caller's handoff or hangup can't touch another's.
+
+Discovery is a poll of `ListRooms` (once a second) rather than a LiveKit
+webhook — a webhook would mean exposing and authenticating an HTTP endpoint on
+a process that otherwise has no inbound network surface. The trade is up to a
+second of extra answer latency.
 
 ## The pipeline
 
-Audio frames flow through a single Pipecat pipeline. The LLM's usual slot is
-occupied by a `BusBridgeProcessor`, which routes frames to whichever agent is
-currently active and pipes its output back:
+Audio frames for one call flow through one Pipecat pipeline. The LLM's usual
+slot is occupied by a `BusBridgeProcessor`, which routes frames to whichever
+agent is currently active and pipes its output back:
 
 ![Pipeline](docs/diagrams/pipeline.png)
 
-The `LLMContext` is created **once** and lives in the main pipeline — the
-agents never own their own copy. That's the whole trick behind context
-retention: a handoff swaps which LLM is reading the context, so there is no
-history to transfer.
+The `LLMContext` is created **once per call** and lives in that call's
+pipeline — the agents never own their own copy. That's the whole trick behind
+context retention: a handoff swaps which LLM is reading the context, so there
+is no history to transfer.
 
 ## Handoff
 
@@ -81,21 +90,22 @@ Set `DEPLOYMENT` or `LOG_FORMAT` explicitly to override either.
 2. Copy `.env.example` to `.env` and fill it in (see below).
 3. Apply `supabase/migrations/0001_reservations.sql` in the Supabase SQL editor.
 4. `uv run bot.py` — it prints a `meet.livekit.io` link you can click to talk
-   to the bot in a browser.
+   to the bot in a browser. Joining creates the room, and the bot joins a
+   moment later, the same way it answers a phone call.
 
 ### Credentials
 
 | Variable | Where it comes from |
 |---|---|
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | [LiveKit Cloud](https://cloud.livekit.io/) → Settings → API Keys |
-| `LIVEKIT_ROOM_NAME` | Any fixed name you choose, e.g. `bella-vista-line` |
 | `OPENAI_API_KEY` | [OpenAI](https://platform.openai.com/api-keys) (billing must be enabled) |
 | `DEEPGRAM_API_KEY` | [Deepgram](https://console.deepgram.com/) (trial credit is plenty) |
 | `CARTESIA_API_KEY` | [Cartesia](https://play.cartesia.ai/) → Settings → API Keys |
 | `SUPABASE_URL`, `SUPABASE_KEY` | [Supabase](https://supabase.com/dashboard) → Data API, plus the **secret** (`sb_secret_…`) key — not the publishable one |
 
 Optional: `OPENAI_MODEL`, `CARTESIA_VOICE_ID`, `CARTESIA_BOOKING_VOICE_ID`,
-`DEPLOYMENT`, `LOG_FORMAT`.
+`DEPLOYMENT`, `LOG_FORMAT`, `LIVEKIT_ROOM_PREFIX` (default `call`, must match
+the dispatch rule), `MAX_CONCURRENT_CALLS` (default `3`).
 
 ## Phone calls
 
@@ -118,9 +128,12 @@ To dial the bot on a real number:
    lk sip dispatch create dispatch-rule.json
    ```
    `inbound-trunk.local.json` (gitignored) holds your phone number;
-   `dispatch-rule.json` pins every call to `LIVEKIT_ROOM_NAME`. The trunk
-   sets a 60s media timeout, since LiveKit otherwise drops calls that go
-   quiet.
+   `dispatch-rule.json` is an **individual** rule, so each call gets its own
+   room named `call_<caller>_<random>` (change `roomPrefix` and
+   `LIVEKIT_ROOM_PREFIX` together if you rename it). The trunk sets a 60s
+   media timeout, since LiveKit otherwise drops calls that go quiet.
+   Replacing an existing direct rule means deleting it first — `lk sip
+   dispatch list`, then `lk sip dispatch delete <id>`.
 4. Run the bot, then dial the number.
 
 **Attack surface note:** the inbound trunk's `numbers` list already scopes it
@@ -138,19 +151,27 @@ docker run --rm --env-file .env bella-vista-bot
 ```
 
 The image runs as a non-root user and takes all secrets from the environment
-at runtime. On Fly.io or ECS, run exactly **one** instance — this is a single
-always-on worker holding one room open, not a horizontally-scalable web
-service — and supply the variables above as platform secrets. Logging switches
-to JSON automatically.
+at runtime. Supply the variables above as platform secrets; logging switches to
+JSON automatically.
+
+One instance answers `MAX_CONCURRENT_CALLS` calls at a time, each with its own
+pipeline, so raise it alongside CPU rather than on its own. Extra instances
+work too — each polls the same room list, and a room is claimed by whichever
+instance starts a session for it first — but two instances can race on a room
+that appears between polls, so treat multi-instance as untested here and scale
+a single machine up first.
 
 ## Observability
 
 Audit events are emitted as structured fields (`event`, `room`, `participant`,
 …), so a log drain can query them instead of grepping text:
 
-`call_started` · `sip_participant_joined` · `handoff` ·
-`availability_checked` · `booking_created` · `booking_rejected` ·
-`call_ended`
+`dispatcher_started` · `call_dispatched` · `call_deferred` · `call_started` ·
+`handoff` · `availability_checked` · `booking_created` · `booking_rejected` ·
+`call_ended` · `call_abandoned` · `session_ended`
+
+Every one carries the `room` it happened in, which is what separates two
+concurrent calls in a log drain.
 
 Per-turn STT / LLM / TTS time-to-first-byte and processing times are logged by
 Pipecat's `MetricsLogObserver`.
@@ -158,12 +179,13 @@ Pipecat's `MetricsLogObserver`.
 ## Notes and limits
 
 - Capacity is a single cap per date+time slot; there's no per-table layout.
-- One fixed room means one concurrent call. Concurrency would need per-call
-  dispatch, which is the natural next step and a substantially different
-  deployment model.
+- Concurrency is bounded by one process. A call arriving while
+  `MAX_CONCURRENT_CALLS` are in flight is logged as `call_deferred` and waits
+  in silence for a slot (or for the trunk's media timeout) — there's no "all
+  our agents are busy" announcement, and no autoscaling.
+- Polling costs up to a second before the bot joins a new call. A LiveKit
+  webhook would remove that at the cost of an authenticated HTTP endpoint.
 - No automated test suite — each increment was verified by making real calls.
-- Pipecat logs the LiveKit access token at INFO on startup; worth silencing
-  before running anywhere that ships logs off-box.
 
 ## Commands
 
@@ -171,7 +193,8 @@ Pipecat's `MetricsLogObserver`.
 uv run bot.py         # run the bot
 uv run mypy           # type-check
 lk sip inbound list   # verify telephony config
-lk room list          # confirm the bot is in the room
+lk sip dispatch list  # confirm the rule is individual, not direct
+lk room list          # one room per call in progress
 ```
 
 Diagram sources live in `docs/diagrams/*.mmd`. To regenerate the images after

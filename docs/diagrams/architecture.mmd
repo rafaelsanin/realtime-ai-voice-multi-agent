@@ -6,15 +6,18 @@ flowchart LR
 
     subgraph Telephony
         Twilio["Twilio<br/>Elastic SIP Trunk"]
-        LKSIP["LiveKit SIP<br/>inbound trunk + dispatch rule"]
+        LKSIP["LiveKit SIP<br/>inbound trunk + individual dispatch rule"]
     end
 
-    Room["LiveKit Cloud room<br/>bella-vista-line"]
+    subgraph Rooms["LiveKit Cloud - one room per call"]
+        RoomA["call_+1555000101_ab12"]
+        RoomB["call_+1555000202_cd34"]
+    end
 
     subgraph Bot["Bot process (container)"]
-        Pipeline["Pipecat pipeline"]
-        Host["Host agent"]
-        Booking["Booking agent"]
+        Dispatcher["CallDispatcher<br/>polls ListRooms"]
+        SessionA["CallSession<br/>pipeline + Host/Booking"]
+        SessionB["CallSession<br/>pipeline + Host/Booking"]
     end
 
     subgraph Providers
@@ -24,13 +27,18 @@ flowchart LR
         SB["Supabase<br/>Postgres"]
     end
 
-    Phone -->|PSTN| Twilio -->|SIP/TCP| LKSIP --> Room
-    Browser -->|WebRTC| Room
-    Room <-->|WebRTC audio| Pipeline
-    Pipeline --> DG
-    Pipeline --> CTS
-    Pipeline <--> Host
-    Pipeline <--> Booking
-    Host --> OAI
-    Booking --> OAI
-    Booking --> SB
+    Phone -->|PSTN| Twilio -->|SIP/TCP| LKSIP --> RoomA
+    Browser -->|WebRTC| RoomB
+    Rooms -.->|new room| Dispatcher
+    Dispatcher -->|spawns one per call| SessionA
+    Dispatcher -->|spawns one per call| SessionB
+    RoomA <-->|WebRTC audio| SessionA
+    RoomB <-->|WebRTC audio| SessionB
+    SessionA --> DG
+    SessionA --> CTS
+    SessionA --> OAI
+    SessionA --> SB
+    SessionB --> DG
+    SessionB --> CTS
+    SessionB --> OAI
+    SessionB --> SB

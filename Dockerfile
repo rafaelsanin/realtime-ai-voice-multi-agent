@@ -10,7 +10,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-install-project --no-dev
 
-COPY bot.py call_state.py db.py reservations.py settings.py workers.py ./
+COPY bot.py call_state.py db.py dispatcher.py reservations.py session.py settings.py workers.py ./
 RUN uv sync --locked --no-dev
 
 # Log format isn't pinned here -- settings.py detects Fly.io/ECS and switches

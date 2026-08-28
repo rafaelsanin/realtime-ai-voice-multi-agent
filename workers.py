@@ -11,11 +11,10 @@ Commit 6: typed, and BookingWorker now takes a ReservationsRepository
 constructor argument (Dependency Inversion) instead of reaching into
 `params.app_resources` for a raw Supabase client.
 
-Fix: this is an always-on line, not a one-shot script -- end_conversation
-used to delete the whole room and end the WorkerRunner, which correctly hung
-up the call but also killed the bot's own connection and process. It now
-only removes the caller's SIP participant, tracked via CallState, so the
-process (and the room) survive to answer the next call.
+Commit 9: a worker belongs to one `CallSession` (one caller, one room), so
+end_conversation removes that session's own caller -- tracked via CallState
+-- rather than tearing down anything process-wide. Other calls in flight are
+unaffected, and the session's dispatcher deletes the room afterwards.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ class _HandoffWorker(LLMWorker):
         # right after calling activate_worker() -- doing it there would fire
         # before the swap actually takes effect and reach the wrong worker.
         # A worker that starts active is kicked off explicitly elsewhere
-        # (bot.py's on_first_participant_joined); only nudge on later
+        # (session.py's on_first_participant_joined); only nudge on later
         # handoffs, but do switch the voice even on that first activation.
         self._skip_next_nudge = active
 
@@ -80,10 +79,6 @@ class _HandoffWorker(LLMWorker):
             return
         await self._main_worker.queue_frames([LLMRunFrame()])
 
-    def silence_next_activation(self) -> None:
-        """Activate without kicking off a spoken turn (empty room / hangup reset)."""
-        self._skip_next_nudge = True
-
     async def _handoff_to(self, target: str) -> None:
         logger.bind(event="handoff", room=self._room_name, source=self.name, target=target).info(
             "agent handoff"
@@ -100,9 +95,8 @@ class _HandoffWorker(LLMWorker):
         await params.result_callback({"ended": True})
         # Stopping the pipeline alone doesn't hang up a PSTN call -- the SIP
         # participant stays in the room (and Twilio keeps billing) until it's
-        # explicitly removed. Remove just the caller (not the whole room, and
-        # without ending the WorkerRunner) so the bot stays up for the next
-        # call -- this is a persistent line, not a one-shot script.
+        # explicitly removed. Removing the caller is what ends this call:
+        # the session sees the disconnect and winds itself down.
         identity = self._call_state.participant_identity
         if identity:
             await self._livekit_api.room.remove_participant(

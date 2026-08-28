@@ -1,12 +1,19 @@
 flowchart TD
     bot["bot.py<br/>BellaVistaBot, entrypoint"]
+    dispatcher["dispatcher.py<br/>CallDispatcher"]
+    session["session.py<br/>CallSession (one per call)"]
     settings["settings.py<br/>Settings, Deployment"]
+    state["call_state.py<br/>CallState"]
     workers["workers.py<br/>HostWorker, BookingWorker"]
     db["db.py<br/>booking rules"]
     res["reservations.py<br/>ReservationsRepository (Protocol)<br/>SupabaseReservationsRepository"]
 
     bot --> settings
-    bot --> workers
+    bot --> dispatcher
     bot -->|injects repository| res
+    dispatcher --> session
+    session --> workers
+    session --> state
+    workers --> state
     workers --> db
     db -->|depends on the protocol,<br/>not on Supabase| res
